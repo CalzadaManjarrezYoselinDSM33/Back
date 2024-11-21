@@ -4,6 +4,9 @@ const mysql = require('mysql2');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const path = require('path');
+const PDFDocument = require('pdfkit');
+const bwipjs = require('bwip-js');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -238,8 +241,46 @@ app.get('/api/cart/:email', (req, res) => {
       }
     });
   });
+  app.post('/api/generate-barcode', (req, res) => {
+    const { email, amount } = req.body;
+    if (!email || !amount) {
+      return res.status(400).json({ message: 'Email y monto son requeridos.' });
+    }
+    bwipjs.toBuffer(
+      {
+        bcid: 'code128',
+        text: `OXXO-${email}-${amount}`,
+        scale: 3,
+        height: 10,
+        includetext: true,
+        textxalign: 'center',
+      },
+      (err, png) => {
+        if (err) {
+          console.error('Error generando el código de barras:', err);
+          return res.status(500).json({ message: 'Error generando el código de barras.' });
+        }
+        const doc = new PDFDocument();
+        const filePath = `barcode-${Date.now()}.pdf`;
+        const writeStream = fs.createWriteStream(filePath);
+        doc.pipe(writeStream);
+        doc.fontSize(20).text(`Paga ${amount} MXN en OXXO`, { align: 'center' });
+        doc.image(png, { align: 'center', fit: [300, 150] });
+        doc.end();
+        writeStream.on('finish', () => {
+          res.download(filePath, () => {
+            fs.unlinkSync(filePath);
+          });
+        });
+      }
+    );
+  });
+  app.post('/create-order', (req, res) => {
+    const { items, totalAmount } = req.body;
   
-
+    console.log(`Total a cobrar: ${totalAmount}`);
+  });
+  
   
 app.use('/uploads', express.static('uploads'));
 
