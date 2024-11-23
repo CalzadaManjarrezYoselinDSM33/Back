@@ -7,6 +7,8 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const bwipjs = require('bwip-js');
 const fs = require('fs');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 require('dotenv').config();
 
 const app = express();
@@ -40,6 +42,21 @@ db.connect((err) => {
   }
   console.log('Connected to MySQL database');
 });
+const authenticateToken = (req, res, next) => {
+  const token = req.headers['authorization'];
+  if (!token) {
+    return res.status(401).json({ message: 'No se proporcionó un token' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ message: 'Token inválido o expirado' });
+    }
+    req.user = user; 
+    next();
+  });
+};
+
 app.get('/api/movies', (req, res) => {
     const category = req.query.category; 
     
@@ -84,25 +101,73 @@ app.post('/api/contact', (req, res) => {
     }
   });
 });
+app.post('/api/register', async (req, res) => {
+  const { name, email, password, role } = req.body;
+
+  if (!name || !email || !password || !role) {
+    return res.status(400).json({ message: 'Todos los campos son obligatorios' });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const query = `INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)`;
+    db.query(query, [name, email, hashedPassword, role], (err, result) => {
+      if (err) {
+        console.error('Error inserting data:', err);
+        return res.status(500).json({ message: 'Error al registrar el usuario' });
+      }
+      res.status(201).json({ message: 'Usuario registrado exitosamente' });
+    });
+  } catch (error) {
+    console.error('Error encrypting password:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+});
 
 app.post('/login', (req, res) => {
-    const { name, email } = req.body;
-  
-    const query = 'SELECT * FROM users WHERE name = ? AND email = ?';
-    db.query(query, [name, email], (err, results) => {
-      if (err) {
-        console.error('Error querying database:', err);
-        return res.status(500).json({ message: 'Internal Server Error' });
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email y contraseña son obligatorios' });
+  }
+
+  const query = 'SELECT * FROM users WHERE email = ?';
+  db.query(query, [email], async (err, results) => {
+    if (err) {
+      console.error('Error querying database:', err);
+      return res.status(500).json({ message: 'Error interno del servidor' });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+
+    const user = results[0];
+
+    try {
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      if (!isValidPassword) {
+        return res.status(401).json({ message: 'Credenciales inválidas' });
       }
-  
-      if (results.length > 0) {
-        const user = results[0];
-        res.status(200).json({ message: 'User found', role: user.role }); 
-      } else {
-        res.status(404).json({ message: 'Invalid credentials' });
-      }
-    });
+
+      const token = jwt.sign(
+        { id: user.id, name: user.name, email: user.email, role: user.role },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRES }
+      );
+
+      res.status(200).json({ message: 'Login exitoso', token });
+    } catch (error) {
+      console.error('Error durante el login:', error);
+      res.status(500).json({ message: 'Error interno del servidor' });
+    }
   });
+});
+
+
+app.get('/api/protected', authenticateToken, (req, res) => {
+  res.json({ message: 'Ruta protegida', user: req.user });
+});
   
 
   app.post('/api/movies', upload.single('image'), (req, res) => {
@@ -137,33 +202,30 @@ app.get('/api/users/:email', (req, res) => {
       }
     });
   }); 
-app.get('/api/cart/:email', (req, res) => {
+  app.get('/api/cart/:email', authenticateToken, (req, res) => {
     const { email } = req.params;
-  
     const queryUser = 'SELECT id FROM users WHERE email = ?';
     db.query(queryUser, [email], (err, results) => {
       if (err) {
         console.error('Error querying user:', err);
-        return res.status(500).json({ message: 'Internal Server Error' });
+        return res.status(500).json({ message: 'Error interno del servidor' });
       }
-  
       if (results.length > 0) {
         const userId = results[0].id;
-  
         const queryCart = 'SELECT c.quantity, m.title, m.image FROM cart c JOIN movies m ON c.movie_id = m.id WHERE c.user_id = ?';
         db.query(queryCart, [userId], (err, cartItems) => {
           if (err) {
             console.error('Error querying cart:', err);
-            return res.status(500).json({ message: 'Internal Server Error' });
+            return res.status(500).json({ message: 'Error interno del servidor' });
           }
-  
           res.status(200).json(cartItems);
         });
       } else {
-        res.status(404).json({ message: 'User not found' });
+        res.status(404).json({ message: 'Usuario no encontrado' });
       }
     });
   });
+  
   
   app.post('/api/cart/:email', (req, res) => {
     const { email } = req.params;
